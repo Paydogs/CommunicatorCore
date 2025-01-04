@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "CommunicatorCore",
     platforms: [
-        .macOS(.v10_15),
+        .macOS(.v12),
         .iOS(.v13)
     ],
     products: [
