@@ -14,7 +14,8 @@ open class Client: @unchecked Sendable {
     public var serviceName: String?
     public var maxDataLength: Int = 1024
 
-    private var connection: NWConnection?
+    private var serverConnection: NWConnection?
+    private var dataBuffer = Data()
 
     public init(serviceName: String? = nil, maxDataLength: Int? = nil) {
         self.serviceName = serviceName
@@ -25,7 +26,7 @@ open class Client: @unchecked Sendable {
     
     open func debugLog(_ message: String) {
         #if DEBUG
-            print("[DEBUG] \(message)")
+            print("[CLIENT][DEBUG] \(message)")
         #endif
     }
 
@@ -66,59 +67,54 @@ open class Client: @unchecked Sendable {
     }
 
     private func connect(to endpoint: NWEndpoint) {
-        connection = NWConnection(to: endpoint, using: .tcp)
-        connection?.start(queue: .main)
-        guard let connection = self.connection else { return }
+        serverConnection = NWConnection(to: endpoint, using: .tcp)
+        serverConnection?.start(queue: .main)
+        guard let serverConnection = self.serverConnection else { return }
 
-        connection.stateUpdateHandler = { [weak self] state in
+        serverConnection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
                 debugLog("Connected to server, waiting for data up to \(maxDataLength) bytes")
                 sendMessage("Hello from client! Receiving data up to \(maxDataLength) bytes")
-                startReceiving(on: connection)
+                startReceiving(on: serverConnection)
             case .failed(let error):
                 debugLog("Connection failed: \(error)")
             default:
                 break
             }
         }
-
     }
     
-    func startReceiving(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: maxDataLength) { [weak self] data, _, isComplete, error in
+    func startReceiving(on serverConnection: NWConnection) {
+        serverConnection.receive(minimumIncompleteLength: 1, maximumLength: maxDataLength) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            
             if let data = data {
-                debugLog("Received \(data.count) bytes")
+                self.dataBuffer.append(data)
                 
-                if let message = String(data: data, encoding: .utf8) {
-                    debugLog("Its a message: \(message)")
-                } else {
-                    if let fileType = detectFileType(from: data) {
-                        debugLog("Its a \(fileType): \(data.count) bytes")
-                    } else {
-                        debugLog("Unknown file type: \(data.count) bytes")
-                    }
+                // Attempt to parse out complete messages
+                while parseOneMessage(from: &self.dataBuffer) {
+                    // Keep extracting until no complete message remains
                 }
             }
             
             if let error = error {
-                debugLog("Connection error: \(error)")
+                self.debugLog("Connection error: \(error)")
             }
-            
             if isComplete {
-                debugLog("Connection closed by peer.")
+                self.debugLog("Connection closed by peer.")
             } else {
-                startReceiving(on: connection) // Continue listening
+                // Keep receiving
+                self.startReceiving(on: serverConnection)
             }
         }
     }
 
     public func sendMessage(_ message: String) {
         debugLog("sending message: \(message)")
-        if connection?.state == .ready {
-            connection?.send(content: message.data(using: .utf8), completion: .contentProcessed { [weak self] error in
+        if serverConnection?.state == .ready {
+            serverConnection?.send(content: message.data(using: .utf8), completion: .contentProcessed { [weak self] error in
                 if let error = error {
                     self?.debugLog("Failed to send message: \(error)")
                 } else {
@@ -132,28 +128,53 @@ open class Client: @unchecked Sendable {
 }
 
 extension Client: Hashable {
-    // Conform to Hashable
     public func hash(into hasher: inout Hasher) {
         hasher.combine(clientId)
     }
 
-    // Conform to Equatable
     public static func == (lhs: Client, rhs: Client) -> Bool {
         return lhs.clientId == rhs.clientId
     }
 }
 
 private extension Client {
-    func detectFileType(from data: Data) -> String? {
-        // Create a temporary file to test the data
-        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
-        do {
-            try data.write(to: tempURL)
-            let fileType = UTType(filenameExtension: tempURL.pathExtension) ?? UTType.data
-            return fileType.description
-        } catch {
-            print("Error writing data to temporary file: \(error)")
-            return nil
+    /// Returns true if a complete message was found and removed from `buffer`,
+    /// or false if not enough data was available.
+    private func parseOneMessage(from buffer: inout Data) -> Bool {
+        // 1) Need at least 4 bytes for the length prefix
+        guard buffer.count >= 4 else { return false }
+        
+        // 2) Read the first 4 bytes to get the payload length
+        let lengthField = buffer[0..<4]
+        let payloadLength = lengthField.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        
+        // 3) Check if the buffer has enough bytes for the full payload
+        guard buffer.count >= 4 + Int(payloadLength) else { return false }
+        
+        // 4) Extract the payload
+        let messageData = buffer[4..<(4 + Int(payloadLength))]
+        
+        // 5) Remove it from the front of the buffer
+        buffer.removeSubrange(0..<(4 + Int(payloadLength)))
+        
+        // 6) Handle the message
+        debugLog("Received a complete message: \(messageData.count) bytes")
+        handleCompleteMessage(messageData)
+        
+        return true
+    }
+
+    private func handleCompleteMessage(_ data: Data) {
+        // For example, try to decode text
+        if let text = String(data: data, encoding: .utf8) {
+            debugLog("It's a text message: \(text)")
+        } else {
+            // Possibly detect file type (PNG, PDF, etc.) using your `mimeType(for:)` method
+            if let fileType = data.mimeType() {
+                debugLog("Received a \(fileType) file (\(data.count) bytes)")
+            } else {
+                debugLog("Unknown binary data (\(data.count) bytes)")
+            }
         }
     }
 }
