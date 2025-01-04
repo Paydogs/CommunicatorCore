@@ -7,15 +7,20 @@
 
 import Foundation
 import Network
+import UniformTypeIdentifiers
 
 open class Client: @unchecked Sendable {
     public var clientId: UUID = UUID()
     public var serviceName: String?
+    public var maxDataLength: Int = 1024
 
     private var connection: NWConnection?
 
-    public init(serviceName: String? = nil) {
+    public init(serviceName: String? = nil, maxDataLength: Int? = nil) {
         self.serviceName = serviceName
+        if let maxDataLength {
+            self.maxDataLength = maxDataLength
+        }
     }
     
     open func debugLog(_ message: String) {
@@ -69,8 +74,8 @@ open class Client: @unchecked Sendable {
             guard let self else { return }
             switch state {
             case .ready:
-                debugLog("Connected to server")
-                sendMessage("Hello from client!")
+                debugLog("Connected to server, waiting for data up to \(maxDataLength) bytes")
+                sendMessage("Hello from client! Receiving data up to \(maxDataLength) bytes")
                 startReceiving(on: connection)
             case .failed(let error):
                 debugLog("Connection failed: \(error)")
@@ -82,19 +87,30 @@ open class Client: @unchecked Sendable {
     }
     
     func startReceiving(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
-            if let data = data, let message = String(data: data, encoding: .utf8) {
-                self?.debugLog("Received message: \(message)")
+        connection.receive(minimumIncompleteLength: 1, maximumLength: maxDataLength) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let data = data {
+                debugLog("Received \(data.count) bytes")
+                
+                if let message = String(data: data, encoding: .utf8) {
+                    debugLog("Its a message: \(message)")
+                } else {
+                    if let fileType = detectFileType(from: data) {
+                        debugLog("Its a \(fileType): \(data.count) bytes")
+                    } else {
+                        debugLog("Unknown file type: \(data.count) bytes")
+                    }
+                }
             }
             
             if let error = error {
-                self?.debugLog("Connection error: \(error)")
+                debugLog("Connection error: \(error)")
             }
             
             if isComplete {
-                self?.debugLog("Connection closed by peer.")
+                debugLog("Connection closed by peer.")
             } else {
-                self?.startReceiving(on: connection) // Continue listening
+                startReceiving(on: connection) // Continue listening
             }
         }
     }
@@ -124,5 +140,20 @@ extension Client: Hashable {
     // Conform to Equatable
     public static func == (lhs: Client, rhs: Client) -> Bool {
         return lhs.clientId == rhs.clientId
+    }
+}
+
+private extension Client {
+    func detectFileType(from data: Data) -> String? {
+        // Create a temporary file to test the data
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        do {
+            try data.write(to: tempURL)
+            let fileType = UTType(filenameExtension: tempURL.pathExtension) ?? UTType.data
+            return fileType.description
+        } catch {
+            print("Error writing data to temporary file: \(error)")
+            return nil
+        }
     }
 }

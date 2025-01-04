@@ -112,13 +112,9 @@ private extension Server {
     
     func startReceiving(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
-            if let data = data {
-                self?.debugLog("Received data: \(data.count) bytes")
-                if let message = String(data: data, encoding: .utf8) {
+            if let data = data,
+               let message = String(data: data, encoding: .utf8) {
                     self?.debugLog("Received message: \(message)")
-                } else {
-                    self?.debugLog("Not a message, data: \(data) bytes")
-                }
             }
 
             if let error = error {
