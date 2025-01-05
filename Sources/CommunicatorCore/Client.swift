@@ -13,8 +13,14 @@ open class Client: @unchecked Sendable {
     public var clientId: UUID = UUID()
     public var serviceName: String?
     public var maxDataLength: Int = 1024
+    public lazy var currentTimeWithMillis = {
+        df.dateFormat = "HH:mm:ss.SSS"
+        return df.string(from: Date())
+    }()
 
+    private let df = DateFormatter()
     private var serverConnection: NWConnection?
+    private var queue: [Data] = []
     private var dataBuffer = Data()
 
     public init(serviceName: String? = nil, maxDataLength: Int? = nil) {
@@ -94,7 +100,7 @@ open class Client: @unchecked Sendable {
                 self.dataBuffer.append(data)
                 
                 // Attempt to parse out complete messages
-                while parseOneMessage(from: &self.dataBuffer) {
+                while isDataReady(from: &self.dataBuffer) {
                     // Keep extracting until no complete message remains
                 }
             }
@@ -110,24 +116,34 @@ open class Client: @unchecked Sendable {
             }
         }
     }
-
+    
     public func sendMessage(_ message: String) {
-        debugLog("sending message: \(message)")
-        if serverConnection?.state == .ready {
-            serverConnection?.send(content: message.data(using: .utf8), completion: .contentProcessed { [weak self] error in
+        guard let data = message.data(using: .utf8) else { return }
+        sendData(data)
+    }
+    
+    func sendData(_ data: Data) {
+        let length = UInt32(data.count).bigEndian // Get the size
+        var header = withUnsafeBytes(of: length) { Data($0) } // Create a header
+        let packet = header + data // Append it to the front
+        
+        if let serverConnection,
+           serverConnection.state == .ready {
+            serverConnection.send(content: packet, completion: .contentProcessed { [weak self] error in
                 if let error = error {
-                    self?.debugLog("Failed to send message: \(error)")
+                    self?.debugLog("Failed to send data: \(error)")
                 } else {
-                    self?.debugLog("Message sent successfully.")
+                    self?.debugLog("Data sent successfully (\(packet.count) bytes).")
                 }
             })
         } else {
-            debugLog("Connection is not ready to send messages.")
+            debugLog("Client is not ready. Queuing data (\(packet.count) bytes).")
+            queue.append(packet)
         }
     }
 }
 
-extension Client: Hashable {
+extension Client: Hashable, Identifiable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(clientId)
     }
@@ -140,7 +156,7 @@ extension Client: Hashable {
 private extension Client {
     /// Returns true if a complete message was found and removed from `buffer`,
     /// or false if not enough data was available.
-    private func parseOneMessage(from buffer: inout Data) -> Bool {
+    func isDataReady(from buffer: inout Data) -> Bool {
         // 1) Need at least 4 bytes for the length prefix
         guard buffer.count >= 4 else { return false }
         
@@ -164,7 +180,7 @@ private extension Client {
         return true
     }
 
-    private func handleCompleteMessage(_ data: Data) {
+    func handleCompleteMessage(_ data: Data) {
         // For example, try to decode text
         if let text = String(data: data, encoding: .utf8) {
             debugLog("It's a text message: \(text)")
