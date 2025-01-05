@@ -13,6 +13,29 @@ struct Constants {
     }
 }
 
+struct NetworkHelper {
+    static func completedData(from buffer: inout Data) -> Data? {
+        guard buffer.count >= 4 else {
+            // Too small to have a header
+            return nil }
+        
+        let lengthField = buffer[0..<4]
+        let payloadLength = lengthField.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        
+        guard buffer.count >= 4 + Int(payloadLength) else {
+            // Not all received
+            return nil
+        }
+        
+        let messageData = buffer[4..<(4 + Int(payloadLength))]
+        
+        // 5) Remove it from the front of the buffer
+        buffer.removeSubrange(0..<(4 + Int(payloadLength)))
+        
+        return messageData
+    }
+}
+
 extension Data {
     func mimeType() -> String? {
         var bytes = [UInt8](repeating: 0, count: 1)

@@ -138,8 +138,21 @@ private extension Client {
                 self.dataBuffer.append(data)
                 
                 self.debugLog("Received: \(data.count) byte, total: \(dataBuffer.count) byte")
-                while isDataReady(from: &self.dataBuffer) {
+                while let data = NetworkHelper.completedData(from: &self.dataBuffer),
+                      data != nil {
                     self.debugLog("Receive complete, databuffer after cleanup: \(dataBuffer.count) byte")
+                    
+                    if let text = String(data: data, encoding: .utf8) {
+                        debugLog("It's a text message: \(text)")
+                    } else {
+                        // Possibly detect file type (PNG, PDF, etc.) using your `mimeType(for:)` method
+                        if let fileType = data.mimeType() {
+                            debugLog("Received a \(fileType) file (\(data.count) bytes)")
+                        } else {
+                            debugLog("Unknown binary data (\(data.count) bytes)")
+                        }
+                    }
+
                 }
             }
             
@@ -153,44 +166,6 @@ private extension Client {
             } else {
                 // Keep receiving
                 self.listenToStream(on: serverConnection)
-            }
-        }
-    }
-    
-    func isDataReady(from buffer: inout Data) -> Bool {
-        // 1) Need at least 4 bytes for the length prefix
-        guard buffer.count >= 4 else { return false }
-        
-        // 2) Read the first 4 bytes to get the payload length
-        let lengthField = buffer[0..<4]
-        let payloadLength = lengthField.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        
-        // 3) Check if the buffer has enough bytes for the full payload
-        guard buffer.count >= 4 + Int(payloadLength) else { return false }
-        
-        // 4) Extract the payload
-        let messageData = buffer[4..<(4 + Int(payloadLength))]
-        
-        // 5) Remove it from the front of the buffer
-        buffer.removeSubrange(0..<(4 + Int(payloadLength)))
-        
-        // 6) Handle the message
-        debugLog("Received a complete message: \(messageData.count) bytes")
-        handleCompleteMessage(messageData)
-        
-        return true
-    }
-
-    func handleCompleteMessage(_ data: Data) {
-        // For example, try to decode text
-        if let text = String(data: data, encoding: .utf8) {
-            debugLog("It's a text message: \(text)")
-        } else {
-            // Possibly detect file type (PNG, PDF, etc.) using your `mimeType(for:)` method
-            if let fileType = data.mimeType() {
-                debugLog("Received a \(fileType) file (\(data.count) bytes)")
-            } else {
-                debugLog("Unknown binary data (\(data.count) bytes)")
             }
         }
     }
