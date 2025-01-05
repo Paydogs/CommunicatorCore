@@ -14,11 +14,11 @@ open class Server: @unchecked Sendable {
     public let serviceType: String
     public let port: UInt16
     public lazy var currentTimeWithMillis = {
-        df.dateFormat = "HH:mm:ss.SSS"
-        return df.string(from: Date())
+        dateFormatter.dateFormat = "HH:mm:ss.SSS"
+        return dateFormatter.string(from: Date())
     }()
 
-    private let df = DateFormatter()
+    private let dateFormatter = DateFormatter()
     private var listener: NWListener?
     private var clients: [ConnectedClient] = []
     private var clientQueues: [ConnectedClient: [Data]] = [:]
@@ -64,6 +64,14 @@ open class Server: @unchecked Sendable {
         // Publish Bonjour service
         listener?.service = NWListener.Service(name: serviceName, type: serviceType)
     }
+    
+    public func stopServer() {
+        sendMessage("Stopping server")
+        clients.forEach { client in
+            client.connection.cancel()
+        }
+        clients = []
+    }
         
     public func sendMessage(_ message: String, to clientId: String? = nil) {
         guard let data = message.data(using: .utf8) else { return }
@@ -82,56 +90,10 @@ open class Server: @unchecked Sendable {
             }
         }
     }
-    
 }
 
+// Connection handling
 private extension Server {
-    func startReceiving(on serverConnection: NWConnection) {
-        serverConnection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            
-            if let data = data {
-                self.dataBuffer.append(data)
-                print("nani, data buffer size: \(self.dataBuffer.count) byte")
-                
-                // Attempt to parse out complete messages
-                while isDataReady(from: &self.dataBuffer) {
-                    print("nani, inside while, data buffer size: \(self.dataBuffer.count) byte")
-                    // Keep extracting until no complete message remains
-                }
-            }
-            
-            if let error = error {
-                self.debugLog("Connection error: \(error)")
-            }
-            if isComplete {
-                self.debugLog("Connection closed by peer.")
-            } else {
-                // Keep receiving
-                self.startReceiving(on: serverConnection)
-            }
-        }
-    }
-    
-    func sendData(_ data: Data, to client: ConnectedClient) {
-        let length = UInt32(data.count).bigEndian // Get the size
-        var header = withUnsafeBytes(of: length) { Data($0) } // Create a header
-        let packet = header + data // Append it to the front
-        
-        if client.connection.state == .ready {
-            client.connection.send(content: packet, completion: .contentProcessed { [weak self] error in
-                if let error = error {
-                    self?.debugLog("Failed to send data: \(error)")
-                } else {
-                    self?.debugLog("Data sent successfully (\(packet.count) bytes).")
-                }
-            })
-        } else {
-            debugLog("Client is not ready. Queuing data (\(packet.count) bytes).")
-            clientQueues[client, default: []].append(packet)
-        }
-    }
-
     func handleConnection(_ client: ConnectedClient) {
         client.connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -157,7 +119,7 @@ private extension Server {
 
         // Start connection
         client.connection.start(queue: .main)
-        startReceiving(on: client.connection)
+        listenToStream(from: client)
 
         // Keep track of the connection
         clients.append(client)
@@ -170,20 +132,58 @@ private extension Server {
     }
 }
 
-extension Server: Hashable, Identifiable {
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(serverId)
-    }
-
-    public static func == (lhs: Server, rhs: Server) -> Bool {
-        return lhs.serverId == rhs.serverId
+// Sending data to clients
+private extension Server {
+    func sendData(_ data: Data, to client: ConnectedClient) {
+        let length = UInt32(data.count).bigEndian // Get the size
+        var header = withUnsafeBytes(of: length) { Data($0) } // Create a header
+        let packet = header + data // Append it to the front
+        let clientIndex = clients.firstIndex(of: client) ?? 0
+        
+        if client.connection.state == .ready {
+            client.connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+                if let error = error {
+                    self?.debugLog("Failed to send data: \(error)")
+                } else {
+                    self?.debugLog("Data sent successfully (\(packet.count) bytes) to Client #\(clientIndex)")
+                }
+            })
+        } else {
+            debugLog("Client is not ready. Queuing data (\(packet.count) bytes).")
+            clientQueues[client, default: []].append(packet)
+        }
     }
 }
 
+// Listening data from clients
 private extension Server {
-    /// Returns true if a complete message was found and removed from `buffer`,
-    /// or false if not enough data was available.
-    private func isDataReady(from buffer: inout Data) -> Bool {
+    func listenToStream(from client: ConnectedClient) {
+        let clientIndex = clients.firstIndex(of: client) ?? 0
+        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 1000 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            
+            if let data = data {
+                self.dataBuffer.append(data)
+                
+                self.debugLog("Received: \(data.count) byte, total: \(dataBuffer.count) byte from Client #\(clientIndex)")
+                while isDataReady(from: &self.dataBuffer) {
+                    self.debugLog("Receive complete, databuffer after cleanup: \(dataBuffer.count) byte")
+                }
+            }
+            
+            if let error = error {
+                self.debugLog("Connection error: \(error)")
+            }
+            if isComplete {
+                self.debugLog("Connection to Client #\(clientIndex) closed")
+            } else {
+                // Keep receiving
+                self.listenToStream(from: client)
+            }
+        }
+    }
+    
+    func isDataReady(from buffer: inout Data) -> Bool {
         // 1) Need at least 4 bytes for the length prefix
         guard buffer.count >= 4 else { return false }
         
@@ -207,7 +207,7 @@ private extension Server {
         return true
     }
 
-    private func handleCompleteMessage(_ data: Data) {
+    func handleCompleteMessage(_ data: Data) {
         // For example, try to decode text
         if let text = String(data: data, encoding: .utf8) {
             debugLog("It's a text message: \(text)")
@@ -222,6 +222,15 @@ private extension Server {
     }
 }
 
+extension Server: Hashable, Identifiable {
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(serverId)
+    }
+
+    public static func == (lhs: Server, rhs: Server) -> Bool {
+        return lhs.serverId == rhs.serverId
+    }
+}
 
 final class ConnectedClient: Hashable, @unchecked Sendable  {
     let clientId: UUID
